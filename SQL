@@ -1,0 +1,133 @@
+WITH
+
+monthly_revenue AS (
+    SELECT
+        user_id,
+        game_name,
+        DATE_TRUNC('month', payment_date) AS payment_month,
+        SUM(revenue_amount_usd)           AS total_revenue
+    FROM project.games_payments
+    GROUP BY 1, 2, 3
+),
+
+users_dedup AS (
+    SELECT DISTINCT ON (user_id, game_name)
+        user_id,
+        game_name,
+        language,
+        has_older_device_model,
+        age
+    FROM project.games_paid_users
+    ORDER BY user_id, game_name
+),    
+
+revenue_with_context AS (
+    SELECT
+        user_id,
+        payment_month,
+        game_name,
+        total_revenue,
+
+        DATE(payment_month - INTERVAL '1 month') AS previous_calendar_month,
+        DATE(payment_month + INTERVAL '1 month') AS next_calendar_month,
+
+        LAG(total_revenue) OVER (PARTITION BY user_id, game_name ORDER BY payment_month) AS previous_paid_month_revenue,
+
+        LAG(payment_month) OVER (PARTITION BY user_id, game_name ORDER BY payment_month) AS previous_paid_month,
+
+        LEAD(payment_month) OVER (PARTITION BY user_id, game_name ORDER BY payment_month) AS next_paid_month
+
+    FROM monthly_revenue
+),
+
+revenue_metrics AS (
+    SELECT
+        user_id,
+        game_name,
+        payment_month,
+        total_revenue,
+        previous_calendar_month,
+        next_calendar_month,
+        previous_paid_month,
+        previous_paid_month_revenue,
+        next_paid_month,
+
+        CASE
+            WHEN previous_paid_month IS NULL
+            THEN total_revenue
+        END AS new_mrr,
+
+        CASE
+            WHEN previous_paid_month IS NULL
+            THEN 1
+        END AS new_paid_users,
+
+        CASE
+            WHEN next_paid_month IS NULL
+              OR next_paid_month != next_calendar_month
+            THEN total_revenue
+        END AS churned_revenue,
+
+        CASE
+            WHEN next_paid_month IS NULL
+              OR next_paid_month != next_calendar_month
+            THEN 1
+        END AS churned_users,
+
+        CASE
+            WHEN previous_paid_month = previous_calendar_month
+             AND total_revenue > previous_paid_month_revenue
+            THEN total_revenue - previous_paid_month_revenue
+        END AS expansion_revenue,
+
+        CASE
+            WHEN previous_paid_month = previous_calendar_month
+             AND total_revenue < previous_paid_month_revenue
+            THEN total_revenue - previous_paid_month_revenue
+        END AS contraction_revenue,
+
+        CASE
+            WHEN next_paid_month IS NULL
+              OR next_paid_month != next_calendar_month
+            THEN next_calendar_month
+        END AS churn_month,
+
+        CASE
+            WHEN previous_paid_month IS NOT NULL 
+            AND previous_paid_month != previous_calendar_month
+            THEN total_revenue
+        END AS back_from_churn_revenue
+
+    FROM revenue_with_context
+)
+
+SELECT
+    rm.user_id,
+    rm.game_name,
+    rm.payment_month,
+    rm.total_revenue,
+    rm.churn_month,
+
+    rm.new_mrr,
+    rm.new_paid_users,
+    rm.churned_revenue,
+    rm.churned_users,
+    rm.expansion_revenue,
+    rm.contraction_revenue,
+    rm.back_from_churn_revenue,
+
+    rm.total_revenue   AS mrr,
+    
+    ud.language,
+    ud.has_older_device_model,
+    ud.age
+    
+   FROM revenue_metrics rm
+LEFT JOIN users_dedup ud                 
+    ON  rm.user_id   = ud.user_id
+    AND rm.game_name = ud.game_name
+
+ORDER BY rm.user_id, rm.game_name, rm.payment_month;
+
+
+
